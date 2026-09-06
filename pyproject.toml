@@ -1,6 +1,6 @@
 [project]
 name = "ebook-to-pdf"
-version = "0.1.0"
+version = "0.2.0"
 description = "Capture a visible e-book viewer region and assemble the pages into a personal-use PDF."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,4 +30,3 @@ packages = ["src/ebook_to_pdf"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

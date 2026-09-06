@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
 from pynput.keyboard import Key, KeyCode
 
 
@@ -55,6 +56,12 @@ class AppSettings:
     output_dir: str = ""
     startup_delay: str = "3.0"
     page_delay: str = "1.0"
+    change_detection: str = "1"
+    duplicate_detection: str = "1"
+    change_timeout: str = "10.0"
+    border_color: str = "#e02020"
+    border_thickness: str = "4"
+    target_window_title: str = ""
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "AppSettings":
@@ -84,6 +91,57 @@ def save_settings(path: Path, settings: AppSettings) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+@dataclass(slots=True)
+class RecoveryManifest:
+    output_path: str
+    captured_files: list[str]
+    next_page: int
+    total_pages: int
+    settings: dict[str, str]
+    version: int = 1
+
+    @classmethod
+    def from_mapping(cls, raw: dict[str, Any]) -> "RecoveryManifest":
+        if int(raw.get("version", 0)) != 1:
+            raise ValueError("지원하지 않는 복구 데이터 버전입니다.")
+        captured_files = raw.get("captured_files")
+        settings = raw.get("settings")
+        if not isinstance(captured_files, list) or not all(isinstance(item, str) for item in captured_files):
+            raise ValueError("복구 이미지 목록이 올바르지 않습니다.")
+        if not isinstance(settings, dict):
+            raise ValueError("복구 설정이 올바르지 않습니다.")
+        manifest = cls(
+            output_path=str(raw["output_path"]),
+            captured_files=captured_files,
+            next_page=int(raw["next_page"]),
+            total_pages=int(raw["total_pages"]),
+            settings={str(key): str(value) for key, value in settings.items()},
+        )
+        if manifest.next_page < 1 or manifest.total_pages < 1:
+            raise ValueError("복구 페이지 정보가 올바르지 않습니다.")
+        return manifest
+
+
+def save_recovery_manifest(path: Path, manifest: RecoveryManifest) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(asdict(manifest), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def load_recovery_manifest(path: Path) -> RecoveryManifest | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return None
+        return RecoveryManifest.from_mapping(raw)
+    except (KeyError, OSError, TypeError, ValueError):
+        return None
 
 
 def parse_aabb(values: tuple[str, str, str, str]) -> AABB:
@@ -119,6 +177,43 @@ def validate_delays(startup_text: str, page_text: str) -> tuple[float, float]:
     if not 0.05 <= page <= 60:
         raise ValueError("페이지 전환 대기 시간은 0.05~60초여야 합니다.")
     return startup, page
+
+
+def validate_capture_options(timeout_text: str, thickness_text: str) -> tuple[float, int]:
+    try:
+        timeout = float(timeout_text.strip())
+        thickness = int(thickness_text.strip())
+    except ValueError as exc:
+        raise ValueError("변경 감지 시간과 테두리 굵기는 숫자로 입력해 주세요.") from exc
+    if not 0.5 <= timeout <= 120:
+        raise ValueError("화면 변경 최대 대기는 0.5~120초여야 합니다.")
+    if not 1 <= thickness <= 20:
+        raise ValueError("테두리 굵기는 1~20px이어야 합니다.")
+    return timeout, thickness
+
+
+def image_signature(image: Image.Image, size: tuple[int, int] = (64, 64)) -> bytes:
+    grayscale = image.convert("L")
+    sample = grayscale.resize(size, Image.Resampling.BILINEAR)
+    grayscale.close()
+    result = sample.tobytes()
+    sample.close()
+    return result
+
+
+def signature_difference_percent(first: bytes, second: bytes) -> float:
+    if len(first) != len(second) or not first:
+        raise ValueError("비교할 화면 서명의 크기가 올바르지 않습니다.")
+    return sum(abs(a - b) for a, b in zip(first, second)) / (len(first) * 255) * 100
+
+
+def format_duration(seconds: float) -> str:
+    total_seconds = max(0, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds_part = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{seconds_part:02d}"
+    return f"{minutes:02d}:{seconds_part:02d}"
 
 
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -192,4 +287,3 @@ def parse_key(value: str) -> Key | KeyCode:
     if len(text) == 1:
         return KeyCode.from_char(text)
     raise ValueError("지원 키: 화살표, Space, Enter, PageDown, PageUp, Home, End, F1~F20, 단일 문자")
-

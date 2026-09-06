@@ -1,17 +1,25 @@
 from pathlib import Path
 
 import pytest
+from PIL import Image
 from pynput.keyboard import Key, KeyCode
 
 from ebook_to_pdf.app import BORDER_THICKNESS, border_geometries, tk_geometry
 from ebook_to_pdf.core import (
     AABB,
     AppSettings,
+    RecoveryManifest,
+    format_duration,
+    image_signature,
+    load_recovery_manifest,
     load_settings,
     normalize_pdf_filename,
     parse_aabb,
     parse_key,
     save_settings,
+    save_recovery_manifest,
+    signature_difference_percent,
+    validate_capture_options,
     validate_delays,
     validate_pages,
 )
@@ -53,6 +61,18 @@ def test_red_border_is_strictly_outside_capture_aabb() -> None:
         assert height >= BORDER_THICKNESS
 
 
+@pytest.mark.parametrize("thickness", [1, 4, 12, 20])
+def test_configurable_border_never_overlaps_capture(thickness: int) -> None:
+    region = AABB(-300, 10, 700, 810)
+    for width, height, x, y in border_geometries(region, thickness).values():
+        assert not (
+            x < region.x2
+            and x + width > region.x1
+            and y < region.y2
+            and y + height > region.y1
+        )
+
+
 @pytest.mark.parametrize("values", [("a", "0", "1", "1"), ("2", "0", "1", "1"), ("0", "3", "1", "2")])
 def test_parse_aabb_rejects_invalid_values(values: tuple[str, str, str, str]) -> None:
     with pytest.raises(ValueError):
@@ -71,6 +91,14 @@ def test_delay_validation() -> None:
     assert validate_delays("3", "0.5") == (3.0, 0.5)
     with pytest.raises(ValueError):
         validate_delays("-1", "1")
+
+
+def test_capture_option_validation() -> None:
+    assert validate_capture_options("10", "4") == (10.0, 4)
+    with pytest.raises(ValueError):
+        validate_capture_options("0.1", "4")
+    with pytest.raises(ValueError):
+        validate_capture_options("10", "21")
 
 
 def test_filename_normalization() -> None:
@@ -104,3 +132,34 @@ def test_broken_settings_fall_back_to_defaults(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
     path.write_text("not-json", encoding="utf-8")
     assert load_settings(path) == AppSettings()
+
+
+def test_image_change_score_and_duration() -> None:
+    black = Image.new("RGB", (100, 80), "black")
+    white = Image.new("RGB", (100, 80), "white")
+    black_signature = image_signature(black)
+    assert signature_difference_percent(black_signature, black_signature) == 0
+    assert signature_difference_percent(black_signature, image_signature(white)) == 100
+    assert format_duration(65) == "01:05"
+    assert format_duration(3665) == "1:01:05"
+    black.close()
+    white.close()
+
+
+def test_recovery_manifest_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "session.json"
+    expected = RecoveryManifest(
+        output_path="C:/output/book.pdf",
+        captured_files=["page-00000001.png", "page-00000002.png"],
+        next_page=3,
+        total_pages=10,
+        settings={"x1": "100", "next_key": "→"},
+    )
+    save_recovery_manifest(path, expected)
+    assert load_recovery_manifest(path) == expected
+
+
+def test_invalid_recovery_manifest_is_ignored(tmp_path: Path) -> None:
+    path = tmp_path / "session.json"
+    path.write_text('{"version": 99}', encoding="utf-8")
+    assert load_recovery_manifest(path) is None
